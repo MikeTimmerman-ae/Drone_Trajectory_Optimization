@@ -89,12 +89,12 @@ class PositionController:
     def P_lin_velocity(self, curr_velocity: np.ndarray, des_velocity: np.ndarray) -> np.ndarray:
         return self.kp_vel @ (des_velocity - curr_velocity)
 
-    def get_desired_attitude(self, curr_attitude: np.ndarray, curr_thrust: float, curr_lin_acc: np.ndarray, des_lin_acc: np.ndarray, beta=np.zeros((3,))):
+    def get_desired_attitude(self, curr_attitude: np.ndarray, curr_thrust: float, curr_lin_acc: np.ndarray, des_lin_acc: np.ndarray):
         """ Get desired attitude from reference position """
-        des_attitude = self.iinversion(curr_attitude, curr_thrust, curr_lin_acc, des_lin_acc, beta=beta)
+        des_attitude = self.iinversion(curr_attitude, curr_thrust, curr_lin_acc, des_lin_acc)
         return np.array([des_attitude[0], des_attitude[1]]), des_attitude[2]
 
-    def iinversion(self, curr_attitude: np.ndarray, curr_thrust: float, curr_lin_acc: np.ndarray, des_lin_acc: np.ndarray, beta) -> np.ndarray:
+    def iinversion(self, curr_attitude: np.ndarray, curr_thrust: float, curr_lin_acc: np.ndarray, des_lin_acc: np.ndarray) -> np.ndarray:
         """ Calculate desired control moment based on previous moment, and desired and current angular acceleration """
         phi = curr_attitude[0]
         theta = curr_attitude[1]
@@ -111,7 +111,7 @@ class PositionController:
                                                 np.cos(theta) * np.cos(phi)]])
         Ginv = np.linalg.inv(G)
 
-        des_attitude = Ginv @ (des_lin_acc - curr_lin_acc - beta) + np.array([phi, theta, curr_thrust])
+        des_attitude = Ginv @ (des_lin_acc - curr_lin_acc) + np.array([phi, theta, curr_thrust])
         return des_attitude
 
 

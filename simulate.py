@@ -14,10 +14,9 @@ matplotlib.use('TkAgg')
 
 
 class Simulate:
-    def __init__(self, trajectory_type="train", augment="conventional", wind="no-wind"):
+    def __init__(self, trajectory_type="train", wind="no-wind"):
         self.config = Config()
         self.trajectory_type = trajectory_type
-        self.augment = augment == "augmented"
         self.wind = wind == "wind"
 
         # Initialize drone, controllers and trajectory
@@ -25,9 +24,6 @@ class Simulate:
         self.position_controller = PositionController(self.drone)
         self.attitude_controller = AttitudeController(self.drone)
         self.control_allocation = ControlAllocation(self.drone)
-        if self.augment:
-            print("Using augmented control law")
-            self.policy = PPO.load(self.config.training.model_dir + 'model-v0')
         self.trajectory = Trajectory(self.config)
 
         self.reset()
@@ -46,8 +42,6 @@ class Simulate:
         self.acceleration_des = np.array([0, 0, 0])
         self.velocity_ref = np.array([0, 0, 0])
         self.position_ref = np.array([0, 0, 0])
-        self.epsilon = np.array([0, 0, 0])
-        self.betas = np.array([0, 0, 0])
         self.time = [0]
 
     def simulate(self):
@@ -60,10 +54,8 @@ class Simulate:
         control_moment = np.zeros((3,))
         thrust_des = -self.drone.m * self.drone.g
 
-        saved_epsilon = np.array(pd.read_csv('data/epsilon.csv', delimiter=" "))
-
         # Simulation loop
-        while self.time[-1] < self.config.traj_config.tf:
+        while self.time[-1] < self.config.traj_config.tf * 1.5:
             # Reference trajectory
             pos_ref = self.trajectory.position_ref(self.time[-1])
             vel_ref = self.trajectory.velocity_ref(self.time[-1])
@@ -71,14 +63,7 @@ class Simulate:
 
             # Position controller
             des_lin_acc = self.position_controller.get_desired_lin_acc(self.drone.position, self.drone.velocity_e, self.drone.lin_acc, pos_ref, vel_ref, acc_ref)
-            if self.augment:
-                obs = np.hstack(((pos_ref - self.drone.position), (vel_ref - self.drone.velocity_e), (self.attitude_ref[-1, :] - self.drone.attitude)))
-                beta = self.policy.predict(obs, deterministic=True)[0]
-                self.betas = np.vstack((self.betas, beta))
-            else:
-                beta = np.array([0, 0, 0])
-                self.betas = np.vstack((self.betas, beta))
-            att_des, thrust_des = self.position_controller.get_desired_attitude(self.drone.attitude, thrust_des, self.drone.lin_acc, des_lin_acc, beta)
+            att_des, thrust_des = self.position_controller.get_desired_attitude(self.drone.attitude, thrust_des, self.drone.lin_acc, des_lin_acc)
             yaw_des = 0     # np.arctan2(drone.state[10], drone.state[9])
             des_attitude = np.array([att_des[0], att_des[1], yaw_des])        # Desired attitude
 
@@ -101,7 +86,11 @@ class Simulate:
             self.velocity_ref = np.vstack((self.velocity_ref, vel_ref))
             self.position_ref = np.vstack((self.position_ref, pos_ref))
             self.time.append(self.time[-1] + self.drone.dt)
-            self.epsilon = np.vstack((self.epsilon, self.drone.lin_acc - des_lin_acc))
+
+            # Termination condition
+            if np.linalg.norm(self.trajectory.waypoints[-1] - self.drone.position) < 0.5:
+                print(f"Drone reach last waypoint {self.time[-1]} sec.")
+                break
 
     def evaluate(self, n=100):
         max_dev = []
@@ -131,8 +120,6 @@ class Simulate:
     def plot(self):
         self.simulate()
         # np.savetxt("data/position_disturbance_conventional.csv", self.states[:, 6:9])
-        # np.savetxt("data/epsilon.csv", self.epsilon)
-        # saved_epsilon = np.array(pd.read_csv('data/epsilon.csv', delimiter=" "))
 
         # Plot states
         fig1, ax = plt.subplots(3, 2)
@@ -257,34 +244,6 @@ class Simulate:
         ax.set_ylabel("Y-position [m]")
         ax.set_zlabel("Z-position [m]")
 
-        # fig5 = plt.figure()
-        # plt.plot(self.time, np.linalg.norm(self.epsilon, axis=1), label='Epsilon')
-        # plt.plot(self.time[1:], np.linalg.norm(saved_epsilon, axis=1), label='Original Epsilon')
-        # plt.plot(self.time, np.linalg.norm(self.betas, axis=1), label='Beta')
-        # plt.xlabel("Time [s]")
-        # plt.ylabel(r"Acceleration Error $||\ddot{\xi}_{i+1} - \ddot{\xi}_{c_i}||_2$")
-        # plt.grid()
-        # plt.legend()
-        #
-        # fig6, ax = plt.subplots(3, 1)
-        #
-        # ax[0].plot(self.time, self.epsilon[:, 0], label="Epsilon")
-        # ax[0].plot(self.time, self.betas[:, 0], label="Beta")
-        # ax[0].plot(self.time[1:], saved_epsilon[:, 0], label="Original Epsilon")
-        # ax[0].set_ylabel("Acceleration Error")
-        # ax[0].grid()
-        # ax[0].legend()
-        #
-        # ax[1].plot(self.time, self.epsilon[:, 1])
-        # ax[1].plot(self.time, self.betas[:, 1])
-        # ax[1].plot(self.time[1:], saved_epsilon[:, 1])
-        # ax[1].grid()
-        #
-        # ax[2].plot(self.time, self.epsilon[:, 2])
-        # ax[2].plot(self.time, self.betas[:, 2])
-        # ax[2].plot(self.time[1:], saved_epsilon[:, 2])
-        # ax[2].grid()
-
         plt.show()
 
 
@@ -295,7 +254,6 @@ if __name__ == '__main__':
         epilog='Text at the bottom of help')
     parser.add_argument("--action", default="plot", choices=["plot", "metrics"])
     parser.add_argument('--trajectory', default="figure-8", choices=["figure-8", "random", "hover"])
-    parser.add_argument('--control_law', default="conventional", choices=["conventional", "augmented"])
     parser.add_argument('--wind_condition', default="no-wind", choices=["no-wind", "wind"])
     parser.add_argument("--num_eval", default=100, type=int)
     parser.add_argument("--seed", default=None, type=int)
@@ -306,10 +264,10 @@ if __name__ == '__main__':
         np.random.seed(args.seed)
 
     # Run simulations
-    simulate = Simulate(trajectory_type=args.trajectory, augment=args.control_law, wind=args.wind_condition)
+    simulate = Simulate(trajectory_type=args.trajectory, wind=args.wind_condition)
     if args.action == "plot":
-        print(f"Plot simulation results on {args.trajectory} trajectory with {args.control_law} control law")
+        print(f"Plot simulation results on {args.trajectory} trajectory.")
         simulate.plot()
     elif args.action == "metrics":
-        print(f"Calculate evaluation metrics with {args.control_law} control law on {args.trajectory} trajectory over {args.num_eval} simulations")
+        print(f"Calculate evaluation metrics on {args.trajectory} trajectory over {args.num_eval} simulations")
         simulate.evaluate(args.num_eval)
