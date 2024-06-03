@@ -2,7 +2,6 @@ from flying_sim.drone import Drone
 from flying_sim.controllers import AttitudeController, ControlAllocation, PositionController
 from flying_sim.trajectory import Trajectory
 from configs.config import Config
-from stable_baselines3.ppo.ppo import PPO
 
 import numpy as np
 import pandas as pd
@@ -14,17 +13,15 @@ matplotlib.use('TkAgg')
 
 
 class Simulate:
-    def __init__(self, trajectory_type="train", wind="no-wind"):
+    def __init__(self, seed, trajectory_type="spline", waypoints="random"):
         self.config = Config()
-        self.trajectory_type = trajectory_type
-        self.wind = wind == "wind"
 
         # Initialize drone, controllers and trajectory
         self.drone = Drone(self.config)
         self.position_controller = PositionController(self.drone)
         self.attitude_controller = AttitudeController(self.drone)
         self.control_allocation = ControlAllocation(self.drone)
-        self.trajectory = Trajectory(self.config)
+        self.trajectory = Trajectory(self.config, self.drone, waypoints, trajectory_type, seed=seed)
 
         self.reset()
 
@@ -37,25 +34,24 @@ class Simulate:
         self.aux_states = np.array([0, 0, 0, 0, 0, 0])
         self.inputs = np.array([0, 0, 0, 0])
         self.angular_vel_ref = np.array([0, 0, 0])
-        self.attitude_ref = np.array([[0, 0, 0]])
+        self.attitude_ref = np.array([0, 0, 0])
         self.acceleration_ref = np.array([0, 0, 0])
         self.acceleration_des = np.array([0, 0, 0])
-        self.velocity_ref = np.array([0, 0, 0])
-        self.position_ref = np.array([0, 0, 0])
+        self.velocity_ref = self.trajectory.velocity_ref(0.)
+        self.position_ref = self.trajectory.position_ref(0.)
+        self.raw_inputs = np.array([0, 0, 0, 0])
+        self.wp_completion = np.zeros((len(self.trajectory.waypoints), ))
         self.time = [0]
 
     def simulate(self):
-        if self.trajectory_type == "random":
-            self.trajectory.random_spline_trajectory()
-        elif self.trajectory_type == "hover":
-            self.trajectory.hover_trajectory()
 
         # Initialize time and control inputs
         control_moment = np.zeros((3,))
         thrust_des = -self.drone.m * self.drone.g
 
         # Simulation loop
-        while self.time[-1] < self.config.traj_config.tf * 1.5:
+        completed = False
+        while self.time[-1] < self.trajectory.time[-1] * 1.1:
             # Reference trajectory
             pos_ref = self.trajectory.position_ref(self.time[-1])
             vel_ref = self.trajectory.velocity_ref(self.time[-1])
@@ -73,7 +69,7 @@ class Simulate:
             control_input = self.control_allocation.get_control_input(control_moment, thrust_des)
 
             # Time step for drone
-            self.drone.step(control_input, wind=self.wind)
+            self.drone.step(control_input)
 
             # Log states and time
             self.states = np.vstack((self.states, self.drone.state.copy()))
@@ -85,12 +81,24 @@ class Simulate:
             self.acceleration_ref = np.vstack((self.acceleration_ref, acc_ref))
             self.velocity_ref = np.vstack((self.velocity_ref, vel_ref))
             self.position_ref = np.vstack((self.position_ref, pos_ref))
+            self.raw_inputs = np.vstack((self.raw_inputs, self.drone.inputs))
             self.time.append(self.time[-1] + self.drone.dt)
 
-            # Termination condition
-            if np.linalg.norm(self.trajectory.waypoints[-1] - self.drone.position) < 0.5:
-                print(f"Drone reach last waypoint {self.time[-1]} sec.")
+            # Waypoint completion condition
+            for i, waypoint in enumerate(self.trajectory.waypoints):
+                if np.linalg.norm(waypoint - self.drone.position) < self.trajectory.r and np.sum(self.wp_completion) == i:
+                    self.wp_completion[i] = 1
+            if np.all(self.wp_completion):
+                completed = True
                 break
+
+        if completed:
+            print(f"Drone reach last waypoint in {self.time[-1]} sec over path length of {self.trajectory.path_length()} m.")
+        else:
+            print(f"Drone did not complete all waypoints: {self.wp_completion}, path length is {self.trajectory.path_length()} m.")
+
+        # np.savetxt("initial_trajectory.csv", self.states)
+        # np.savetxt("initial_inputs.csv", self.raw_inputs)
 
     def evaluate(self, n=100):
         max_dev = []
@@ -220,19 +228,19 @@ class Simulate:
         ax[3].set_ylabel("rotational velocity 4 [rad/s]")
         ax[3].grid()
 
-        fig4, ax = plt.subplots(3, 1)
-
-        ax[0].plot(self.time[:-1], self.drone.thrust[::4])
-        ax[0].set_ylabel("Drag force magnitude [N]")
-        ax[0].grid()
-
-        ax[1].plot(self.time[:-1], self.drone.gravity[::4])
-        ax[1].set_ylabel("Gravity force magnitude [N]")
-        ax[1].grid()
-
-        ax[2].plot(self.time[:-1], self.drone.drag[::4])
-        ax[2].set_ylabel("Drag force magnitude [N]")
-        ax[2].grid()
+        # fig4, ax = plt.subplots(3, 1)
+        #
+        # ax[0].plot(self.time[:-1], self.drone.thrust[::4])
+        # ax[0].set_ylabel("Drag force magnitude [N]")
+        # ax[0].grid()
+        #
+        # ax[1].plot(self.time[:-1], self.drone.gravity[::4])
+        # ax[1].set_ylabel("Gravity force magnitude [N]")
+        # ax[1].grid()
+        #
+        # ax[2].plot(self.time[:-1], self.drone.drag[::4])
+        # ax[2].set_ylabel("Drag force magnitude [N]")
+        # ax[2].grid()
 
         plt.tight_layout()
 
@@ -253,10 +261,11 @@ if __name__ == '__main__':
         description='This program simulates the trajectory controller, either summarizing some metrics or plotting results',
         epilog='Text at the bottom of help')
     parser.add_argument("--action", default="plot", choices=["plot", "metrics"])
-    parser.add_argument('--trajectory', default="figure-8", choices=["figure-8", "random", "hover"])
-    parser.add_argument('--wind_condition', default="no-wind", choices=["no-wind", "wind"])
+    parser.add_argument('--trajectory', default="spline", choices=["spline", "optimize", "CPC"])
+    parser.add_argument('--waypoints', default="random", choices=["random", "track", "figure-8", "hover"])
     parser.add_argument("--num_eval", default=100, type=int)
     parser.add_argument("--seed", default=None, type=int)
+
     args = parser.parse_args()
 
     if type(args.seed) is int:
@@ -264,7 +273,7 @@ if __name__ == '__main__':
         np.random.seed(args.seed)
 
     # Run simulations
-    simulate = Simulate(trajectory_type=args.trajectory, wind=args.wind_condition)
+    simulate = Simulate(args.seed, trajectory_type=args.trajectory, waypoints=args.waypoints)
     if args.action == "plot":
         print(f"Plot simulation results on {args.trajectory} trajectory.")
         simulate.plot()

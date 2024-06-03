@@ -70,9 +70,9 @@ class PositionController:
     def __init__(self, drone):
         self.drone = drone
 
-        self.kp_acc = np.diag([0.1, 0.1, 0.1])
-        self.kp_vel = np.diag([0.9, 0.9, 0.3])
-        self.kp_pos = np.diag([1.2, 1.2, 0.5])
+        self.kp_acc = np.diag([0.2, 0.2, 0.2])
+        self.kp_vel = np.diag([2.0, 2.0, 2.0])
+        self.kp_pos = np.diag([3.5, 3.5, 3.5])
 
         self.LPF_acc = LowPassFiter(drone.dt, 2 * np.pi * 2, 3)
         self.LPF_att = LowPassFiter(drone.dt, 2 * np.pi * 6, 2)

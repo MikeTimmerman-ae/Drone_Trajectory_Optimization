@@ -1,5 +1,8 @@
 import numpy as np
 import pandas as pd
+import jax
+import jax.numpy as jnp
+from functools import partial
 
 
 class Drone:
@@ -8,11 +11,10 @@ class Drone:
 
         # State variables
         init_pos = config.traj_config.init_pos
-        self.state = np.array([init_pos[0], init_pos[1], init_pos[2], 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        self.x0 = np.array([0, 0, 0, 0, 0, 0, init_pos[0], init_pos[1], init_pos[2], 0, 0, 0])
         self.dt = config.env_config.dt
         self.lin_acc = np.array([0, 0, 0])
 
-        self.wind = True
         self.drag = []
         self.thrust = []
         self.gravity = []
@@ -53,14 +55,51 @@ class Drone:
         return self.state[6:9]
 
     @property
-    def velocity_b(self):
+    def velocity_e(self):
         return self.state[9:12]
 
     @property
-    def velocity_e(self):
-        return self.rotationBodytoEarth(self.attitude) @ self.velocity_b
+    def velocity_b(self):
+        return self.rotationBodytoEarth(self.attitude).T @ self.velocity_e
 
-    def step(self, input: np.ndarray, wind=False):
+    def f(self, state: np.ndarray, input: np.ndarray):
+        dx = jnp.zeros((self.x_dim,))
+
+        # Derivatives of attitude angles (phi, theta, psi)
+        kinematics = jnp.array([[1, jnp.tan(state[1]) * jnp.sin(state[0]), jnp.tan(state[1]) * jnp.cos(state[0])],
+                                [0, jnp.cos(state[0]), -jnp.sin(state[0])],
+                                [0, jnp.sin(state[0]) / jnp.cos(state[1]), jnp.cos(state[0]) / jnp.cos(state[1])]])
+        dx = dx.at[0:3].set(kinematics @ state[3:6])  # dphi, dtheta, dpsi
+
+        # Derivative of angular velocity (p, q, r)
+        dx = dx.at[3:6].set(jnp.array([((self.I[1, 1] - self.I[2, 2]) * state[5] * state[4] + input[0]) / self.I[0, 0],
+                                       ((self.I[2, 2] - self.I[0, 0]) * state[5] * state[3] + input[1]) / self.I[1, 1],
+                                       ((self.I[0, 0] - self.I[1, 1]) * state[4] * state[3] + input[2]) / self.I[2, 2]]))
+
+        # Derivative of position (x, y, z)
+        dx = dx.at[6:9].set(state[9:12])                                        # dx, dy, dz
+
+        # Derivative of velocity (vx, vy, vz)
+        T = self.Reb(state[0:3]) @ jnp.array([0, 0, input[3]])
+        G = np.array([0, 0, self.m * self.g])
+        dx = dx.at[9:12].set((T + G) / self.m)                                  # dvx, dvy, dvz
+
+        return dx
+
+    @partial(jax.jit, static_argnums=(0,))
+    @partial(jax.vmap, in_axes=(None, 0, 0))
+    def affinize(self, state: np.ndarray, input: np.ndarray):
+        """ Affinize the discrete-time dynamics around (state, input) """
+        A, B = jax.jacfwd(lambda s, u: s + self.dt * self.f(s, u), argnums=(0, 1))(state, input)
+        c = state + self.dt * self.f(state, input)
+        return A, B, c
+
+    def reset(self):
+        self.state = self.x0
+        self.dt = self.config.env_config.dt
+        self.lin_acc = np.array([0, 0, 0])
+
+    def step(self, input: np.ndarray):
         """ Discrete-time dynamics (Runge-Kutta 4) of a planar quadrotor """
         assert self.state.shape == (self.x_dim, ), f"{self.state.shape} does not equal {(self.x_dim, )}"
         assert input.shape == (self.u_dim, ), f"{input.shape} does not equal {(self.u_dim, )}"
@@ -70,17 +109,6 @@ class Drone:
         k3 = self.dxdt(self.state + self.dt / 2 * k2, input)
         k4 = self.dxdt(self.state + self.dt * k3, input)
         self.state = self.state + self.dt * (1 / 6 * k1 + 1 / 3 * k2 + 1 / 3 * k3 + 1 / 6 * k4)
-        if wind and self.wind:
-            Rbe = np.linalg.inv(self.rotationBodytoEarth(self.attitude))
-            wind = 3 * np.array([np.sqrt(3) / 3, np.sqrt(3) / 3, np.sqrt(3) / 3])
-            self.state[9:12] += Rbe @ wind
-            self.wind = False
-
-    def reset(self):
-        init_pos = self.config.traj_config.init_pos
-        self.state = np.array([init_pos[0], init_pos[1], init_pos[2], 0, 0, 0, 0, 0, 0, 0, 0, 0])
-        self.dt = self.config.env_config.dt
-        self.lin_acc = np.array([0, 0, 0])
 
     def dxdt(self, state, input) -> np.ndarray:
         """
@@ -91,10 +119,15 @@ class Drone:
         force = self.get_force(state, input)
         moment = self.get_moment(input)
 
+        T = np.array([[0, 0, 0, 0],
+                      [0, 0, 0, 0],
+                      [self.kf, self.kf, self.kf, self.kf]]) @ input
+        self.inputs = np.hstack((moment, T[2]))
+
         # Derivatives of attitude angles (phi, theta, psi)
         kinematics = np.array([[1, np.tan(state[1]) * np.sin(state[0]), np.tan(state[1]) * np.cos(state[0])],
-                               [0, np.cos(state[0]), -np.sin(state[0])],
-                               [0, np.sin(state[0]) / np.cos(state[1]), np.cos(state[0]) / np.cos(state[1])]])
+                                [0, np.cos(state[0]), -np.sin(state[0])],
+                                [0, np.sin(state[0]) / np.cos(state[1]), np.cos(state[0]) / np.cos(state[1])]])
         dx[0:3] = kinematics @ state[3:6]                                            # dphi, dtheta, dpsi
 
         # Derivative of angular velocity (p, q, r)
@@ -104,13 +137,13 @@ class Drone:
 
         # Derivative of position (x, y, z)
         Reb = self.rotationBodytoEarth(state[0:3])  # rotation matrix body-fixed to NED
-        dx[6:9] = Reb @ state[9:12]                                                # dx, dy, dz
+        dx[6:9] = state[9:12]                                                             # dx, dy, dz
 
-        # Derivative of velocity (u, v, w)
-        dx[9:12] = np.cross(state[9:12], state[3:6]) + force / self.m              # du, dv, dw
+        # Derivative of velocity (vx, vy, vz)
+        dx[9:12] = Reb @ force / self.m                                     # dvx, dvy, dvz
 
         # Linear acceleration
-        self.lin_acc = Reb @ force / self.m                                         # ax, ay, az
+        self.lin_acc = dx[9:12]                                             # ax, ay, az
         return dx
 
     def get_force(self, state: np.ndarray, control_input: np.ndarray) -> np.ndarray:
@@ -118,19 +151,14 @@ class Drone:
         # Thrust
         T = np.array([[0, 0, 0, 0],
                       [0, 0, 0, 0],
-                      [self.kf, self.kf, self.kf, self.kf]]) @ np.clip(control_input, -self.max_rotor_speed**2,
-                                                                       self.max_rotor_speed**2)
-        self.thrust.append(np.linalg.norm(T))
+                      [self.kf, self.kf, self.kf, self.kf]]) @ control_input
+
         # Gravity
-        Rbe = np.linalg.inv(self.rotationBodytoEarth(state[0:3]))
+        Rbe = jnp.linalg.inv(self.rotationBodytoEarth(state[0:3]))
         G = Rbe @ np.array([0, 0, self.m * self.g])
-        self.gravity.append(np.linalg.norm(G))
 
         # Drag
-        # D = np.random.normal(self.Cd_v, self.Cd_v/5) * 1 / 2 * self.rho * state[9:12] ** 2 * self.A
         D = self.Cd_v * 1 / 2 * self.rho * state[9:12] ** 2 * self.A
-        # D = 0 * 1 / 2 * self.rho * state[9:12] ** 2 * self.A
-        self.drag.append(np.linalg.norm(D))
 
         return T + G + D
 
@@ -160,6 +188,23 @@ class Drone:
         assert np.isclose(np.linalg.norm(Rbe @ np.array([1/np.sqrt(3), 1/np.sqrt(3), 1/np.sqrt(3)])), 1), f"Rotation changes vector magnitude"
         return Rbe
 
+    def Reb(self, euler_angles: np.ndarray) -> jnp.ndarray:
+        phi = euler_angles[0]
+        theta = euler_angles[1]
+        psi = euler_angles[2]
+
+        Ryaw = jnp.array([[jnp.cos(psi), -jnp.sin(psi), 0],
+                         [jnp.sin(psi), jnp.cos(psi), 0],
+                         [0, 0, 1]])
+        Rpitch = jnp.array([[jnp.cos(theta), 0, jnp.sin(theta)],
+                           [0, 1, 0],
+                           [-jnp.sin(theta), 0, jnp.cos(theta)]])
+        Rroll = jnp.array([[1, 0, 0],
+                          [0, jnp.cos(phi), -jnp.sin(phi)],
+                          [0, jnp.sin(phi), jnp.cos(phi)]])
+        Reb = Ryaw @ Rpitch @ Rroll
+
+        return Reb
 
 
 def test_rotationBodyEarth():

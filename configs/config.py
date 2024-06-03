@@ -12,7 +12,7 @@ class Config(object):
     # Configuration of Environment
     env_config = BaseConfig()
     env_config.env_train = "flying_sim:flying_sim/FlightEnv"
-    env_config.dt = 0.01
+    env_config.dt = 0.05
     env_config.t0 = 0.
     env_config.seed = 10
     env_config.g = 9.807  # gravity (m / s**2)
@@ -44,18 +44,18 @@ class Config(object):
     drone_config = BaseConfig()
     drone_config.x_dim = 12  # state dimension (see dynamics below)
     drone_config.u_dim = 4  # control dimension (see dynamics below)
-    drone_config.m = 0.695  # mass (kg)
-    drone_config.lx = 0.258 / 2  # half-length (m)
-    drone_config.ly = 0.2 / 2  # half-width (m)
-    drone_config.I = np.diag([3.558e-4, 2.219e-3, 6.216e-3])  # moment of inertia about the out-of-plane axis (kg * m**2)
+    drone_config.m = 0.85  # mass (kg)
+    drone_config.lx = 0.15  # half-length (m)
+    drone_config.ly = 0.15  # half-width (m)
+    drone_config.I = np.diag([0.001, 0.001, 0.0017])  # moment of inertia about the out-of-plane axis (kg * m**2)
     drone_config.A = 0.026  # effective area (m2)
     drone_config.Cd_v = 0.3  # translational drag coefficient
     drone_config.Cd_om = 0.02255  # rotational drag coefficient
 
     # Configuration of randomly generated trajectory
     traj_config = BaseConfig()
-    traj_config.init_pos = np.array([0.0, 0.0, 0.0])
+    traj_config.init_pos = np.array([0.0, 0.0, -2.0])
     traj_config.tf = 25
-    traj_config.min_dist = 25
-    traj_config.max_dist = 50
-    traj_config.v_des = 9
+    traj_config.min_dist = 10
+    traj_config.max_dist = 20
+    traj_config.v_des = 5
