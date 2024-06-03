@@ -1,2 +1,0 @@
-obs = np.hstack((drone.velocity_e, drone.attitude))
-
